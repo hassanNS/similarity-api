@@ -1,5 +1,7 @@
+import { cosineSimilarity } from "@/helpers/cosine-similarity";
 import { withMethods } from "@/lib/api-middlewares/with-methods";
 import { db } from "@/lib/db";
+import { openai } from "@/lib/openai";
 import { ResponseInternalServerError, ResponseUnauthorized, ResponseZodError } from "@/lib/responses";
 import { NextApiRequest, NextApiResponse } from "next";
 import { z } from "zod";
@@ -15,30 +17,74 @@ const handler = async (req: NextApiRequest, res: NextApiResponse) => {
   const apiKey = req.headers.authorization;
 
 
-  if (!apiKey) ResponseUnauthorized(res);
+  if (!apiKey) {
+    return res.status(401).json({
+      error: 'Unauthorized'
+    });
+  }
 
   try {
     const { text1, text2 } = reqSchema.parse(body);
 
     // Check that the user has a valid api key;
 
-    const validApiKey = db.apiKey.findFirst({
+    const validApiKey = await db.apiKey.findFirst({
       where: {
         key: apiKey,
-        enabled: true
-      }
-    });
+        enabled: true,
+      },
+    })
 
-    if (!validApiKey) ResponseUnauthorized(res);
+    if (!validApiKey) {
+      return res.status(401).json({
+        error: 'Unauthorized'
+      });
+    }
 
+    const start = new Date();
 
+    const embeddings = await Promise.all(
+      [text1, text2].map(async (text) => {
+        const res = await openai.createEmbedding({
+          model: 'text-embedding-ada-002',
+          input: text,
+        })
+
+        // the converted text to numbers that are vectors
+        return res.data.data[0].embedding;
+      })
+    );
+
+    const similiarity = cosineSimilarity(embeddings[0], embeddings[1]);
+
+    const duration = new Date().getTime() - start.getTime();
+
+    // persist the request
+      await db.apiRequest.create({
+        data: {
+          duration,
+          method: req.method as string,
+          path: req.url as string,
+          status: 200,
+          apiKeyId: validApiKey.id,
+          usedApiKey: validApiKey.key
+        },
+      });
+
+      return res.status(200).json({success: true, text1, text2, similiarity})
 
   } catch(error) {
     if (error instanceof z.ZodError) {
-      ResponseZodError(res, error);
+      return res.status(400).json({
+        error: error.issues,
+        success: false
+      })
     }
 
-    ResponseInternalServerError(res);
+    console.log(error);
+    return res.status(500).json({
+      error: 'Internal Server Error'
+    })
   }
 
 }
